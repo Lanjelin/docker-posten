@@ -13,6 +13,8 @@ from flask import (
     jsonify,
     send_from_directory,
 )
+from gevent.pywsgi import WSGIServer
+from werkzeug.middleware.proxy_fix import ProxyFix
 from cachetools import cached, TTLCache
 import datetime as dt
 
@@ -68,7 +70,7 @@ def hello():
     return make_response(
         f"Usage: <br>" \
         f"&emsp; <a href='{request.url_root}raw/4321.json'>{request.url_root}raw/4321.json</a> for raw data.<br>" \
-        f"&emsp; <a href='{request.url_root}raw/4321.json'>{request.url_root}text/4321.json</a> for formatted text dates.<br>" \
+        f"&emsp; <a href='{request.url_root}text/4321.json'>{request.url_root}text/4321.json</a> for formatted text dates.<br>" \
         f"<br><br><a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
     )
 
@@ -104,4 +106,7 @@ def deilvery_days(postCode):
         return jsonify({"Error": delivery_dates[1]})
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    #app.run(debug=False, host="0.0.0.0", port=5000)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    http_server = WSGIServer(("0.0.0.0", 5000), app)
+    http_server.serve_forever()
