@@ -67,8 +67,8 @@ def hello():
     #return f"Usage: {request.url_root}PostalCode.json"
     return make_response(
         f"Usage: <br>" \
-        f"&emsp; <a href='{request.url_root}/raw/4321.json'>{request.url_root}/raw/4321.json</a> for raw data.<br>" \
-        f"&emsp; <a href='{request.url_root}/raw/4321.json'>{request.url_root}/text/4321.json</a> for formatted text dates.<br>" \
+        f"&emsp; <a href='{request.url_root}raw/4321.json'>{request.url_root}raw/4321.json</a> for raw data.<br>" \
+        f"&emsp; <a href='{request.url_root}raw/4321.json'>{request.url_root}text/4321.json</a> for formatted text dates.<br>" \
         f"<br><br><a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
     )
 
