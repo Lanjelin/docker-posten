@@ -12,11 +12,16 @@ from flask import (
     make_response,
     jsonify,
     send_from_directory,
-    render_template,
 )
 from cachetools import cached, TTLCache
+import datetime as dt
 
-@cached(cache=TTLCache(maxsize=1024, ttl=60*30))
+def ttl_midnight():
+    tomorrow = dt.date.today() + dt.timedelta(1)
+    midnight = dt.datetime.combine(tomorrow, dt.time())
+    return (midnight - dt.datetime.now()).seconds
+
+@cached(cache=TTLCache(maxsize=5096, ttl=ttl_midnight()))
 def Posten(postCode):
     s = session()
     s.headers["User-Agent"] = "Mozilla/5.0"
@@ -59,17 +64,42 @@ def favicon():
 
 @app.route("/")
 def hello():
-    return f"Usage: {request.url_root}PostalCode.json"
+    #return f"Usage: {request.url_root}PostalCode.json"
+    return make_response(
+        f"Usage: <br>" \
+        f"&emsp; <a href='{request.url_root}/raw/4321.json'>{request.url_root}/raw/4321.json</a> for raw data.<br>" \
+        f"&emsp; <a href='{request.url_root}/raw/4321.json'>{request.url_root}/text/4321.json</a> for formatted text dates.<br>" \
+        f"<br><br><a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
+    )
 
-@app.route("/<int:postCode>", methods=["GET"])
-@app.route("/<int:postCode>.json", methods=["GET"])
+
+@app.route("/raw/<int:postCode>", methods=["GET"])
+@app.route("/raw/<int:postCode>.json", methods=["GET"])
 @cross_origin()
-def serveDelivery(postCode):
+def delivery_raw(postCode):
     if not request.method == "GET":
         return 404
     delivery_dates = Posten(postCode)
     if delivery_dates[0]:
         return jsonify(json.loads(delivery_dates[1]))
+    else:
+        return jsonify({"Error": delivery_dates[1]})
+
+@app.route("/text/<int:postCode>", methods=["GET"])
+@app.route("/text/<int:postCode>.json", methods=["GET"])
+@cross_origin()
+def deilvery_days(postCode):
+    if not request.method == "GET":
+        return 404
+    delivery_dates = Posten(postCode)
+    if delivery_dates[0]:
+        weekdays = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"]
+        months = ["Januar", "Februar", "Mars", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Desember"]
+        text_dates = []
+        for date in json.loads(delivery_dates[1])['delivery_dates']:
+            date = dt.datetime.strptime(date, "%Y-%m-%d")
+            text_dates.append(f"{weekdays[date.weekday()]} {date.day}. {months[date.month-1]}")
+        return jsonify({"delivery_dates": text_dates})
     else:
         return jsonify({"Error": delivery_dates[1]})
 
