@@ -131,7 +131,7 @@ def deilvery_days(postCode):
 
 
 if __name__ == "__main__":
-  logging.basicConfig(filename='logs/posten.log', format='%(asctime)s %(levelname)s:%(message)s', datefmt='%d/%m/%Y %H:%M:%S', level=logging.INFO)
+  logging.basicConfig(filename=os.path.join(app.root_path, 'logs/posten.log'), format='%(asctime)s %(levelname)s:%(message)s', datefmt='%d/%m/%Y %H:%M:%S', level=logging.INFO)
   app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
   http_server = WSGIServer(("0.0.0.0", 5000), app)
   http_server.serve_forever()
