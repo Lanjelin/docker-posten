@@ -102,7 +102,10 @@ def hello():
 @app.route("/raw/<int:postCode>.json", methods=["GET"])
 @cross_origin()
 def delivery_raw(postCode):
+  postCode = str(postCode).zfill(4)
   if not request.method == "GET":
+    return 404
+  if not (len(str(postCode)) == 4):
     return 404
   delivery_dates = Posten(postCode)
   if delivery_dates[0]:
@@ -115,7 +118,10 @@ def delivery_raw(postCode):
 @app.route("/text/<int:postCode>.json", methods=["GET"])
 @cross_origin()
 def deilvery_days(postCode):
+  postCode = str(postCode).zfill(4)
   if not request.method == "GET":
+    return 404
+  if not (len(str(postCode)) == 4):
     return 404
   delivery_dates = Posten(postCode)
   if delivery_dates[0]:
