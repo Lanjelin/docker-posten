@@ -12,6 +12,7 @@ from flask import (
   make_response,
   jsonify,
   send_from_directory,
+  Response,
 )
 from gevent.pywsgi import WSGIServer
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -104,9 +105,9 @@ def hello():
 def delivery_raw(postCode):
   postCode = str(postCode).zfill(4)
   if not request.method == "GET":
-    return 404
+    return Response(status=405)
   if not (len(str(postCode)) == 4):
-    return 404
+    return Response(status=404)
   delivery_dates = Posten(postCode)
   if delivery_dates[0]:
     return jsonify(json.loads(delivery_dates[1]))
@@ -120,9 +121,9 @@ def delivery_raw(postCode):
 def deilvery_days(postCode):
   postCode = str(postCode).zfill(4)
   if not request.method == "GET":
-    return 404
+    return Response(status=405)
   if not (len(str(postCode)) == 4):
-    return 404
+    return Response(status=404)
   delivery_dates = Posten(postCode)
   if delivery_dates[0]:
     weekdays = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"]
