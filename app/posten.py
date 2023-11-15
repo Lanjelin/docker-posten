@@ -158,7 +158,7 @@ def delivery_next(postCode):
         next_dates.append(f"om {nextDate} dager")
       else:
         next_dates.append(nextDatesStrings[nextDate])
-    return jsonify({"deilvery_dates": next_dates})
+    return jsonify({"delivery_dates": next_dates})
   else:
     return jsonify({"Error": delivery_dates[1]})
   
