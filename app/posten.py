@@ -22,6 +22,7 @@ import base64
 import time
 import logging
 
+import sys
 
 def ttl_midnight():
   tomorrow = dt.date.today() + dt.timedelta(1)
@@ -95,7 +96,8 @@ def hello():
     f"Usage: <br>" \
     f"&emsp; <a href='{request.url_root}raw/4321.json'>{request.url_root}raw/4321.json</a> for raw data.<br>" \
     f"&emsp; <a href='{request.url_root}text/4321.json'>{request.url_root}text/4321.json</a> for formatted text dates.<br>" \
-    f"<br><br>Source on <a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
+    f"&emsp; <a href='{request.url_root}next/4321.json'>{request.url_root}next/4321.json</a> for days until next delivery.<br>" \
+     f"<br><br>Source on <a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
   )
 
 
@@ -136,7 +138,30 @@ def deilvery_days(postCode):
   else:
     return jsonify({"Error": delivery_dates[1]})
 
-
+@app.route("/next/<int:postCode>", methods=["GET"])
+@app.route("/next/<int:postCode>.json", methods=["GET"])
+@cross_origin()
+def delivery_next(postCode):
+  postCode = str(postCode).zfill(4)
+  if not request.method == "GET":
+    return Response(status=405)
+  if not (len(str(postCode)) == 4):
+    return Response(status=404)
+  delivery_dates = Posten(postCode)
+  if delivery_dates[0]:
+    nextDatesStrings = ["i dag", "i morgen", "i overmorgen"]
+    next_dates = []
+    for date in json.loads(delivery_dates[1])['delivery_dates']:
+      deliveryDate = dt.datetime.strptime(date, "%Y-%m-%d").date()
+      nextDate = (deliveryDate - dt.datetime.now().date()).days
+      if nextDate > 2:
+        next_dates.append(f"om {nextDate} dager")
+      else:
+        next_dates.append(nextDatesStrings[nextDate])
+    return jsonify({"deilvery_dates": next_dates})
+  else:
+    return jsonify({"Error": delivery_dates[1]})
+  
 if __name__ == "__main__":
   logging.basicConfig(filename=os.path.join(app.root_path, 'logs/posten.log'), format='%(asctime)s %(levelname)s:%(message)s', datefmt='%d/%m/%Y %H:%M:%S', level=logging.INFO)
   app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
