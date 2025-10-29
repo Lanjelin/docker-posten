@@ -63,7 +63,7 @@ LAST_UPSTREAM_STATUS = {
     "interpreted_status": None,   # what our app concluded (e.g., 502 on empty data)
     "error": None,                # short reason when we treat as error
     "when": None,
-    "note": None,                 # e.g., "generated ok", "generated failed, scraped ok"
+    "note": None,                 # e.g., "generated ok", "generated failed, scraped ok (cached)"
     "body_preview": None,         # short preview of upstream body
 }
 
@@ -190,7 +190,13 @@ def Posten(postCode: str):
     key = (today, postCode)
     # return cached success if available
     if key in _DAILY_CACHE:
-        return _DAILY_CACHE[key]
+        cached = _DAILY_CACHE[key]  # (True, {"delivery_dates": [...], "note": "..."})
+        base_note = cached[1].get("note", "pulled from cache")
+        note_cached = f"{base_note} (cached)"
+        # reflect cached-serve in health
+        _record_health(200, note_cached, body_preview=None, interpreted_status=200, error=None)
+        # return a copy with "(cached)" in note (without mutating stored cache)
+        return (True, {"delivery_dates": cached[1]["delivery_dates"], "note": note_cached})
 
     s = _new_session()
 
@@ -199,10 +205,13 @@ def Posten(postCode: str):
     ok, payload, code = _fetch_dates(s, gen_token, postCode)
     if ok:
         LAST_UPSTREAM_STATUS["note"] = "generated ok"
-        _DAILY_CACHE[key] = (True, payload)
-        return (True, payload)
+        # store original note (no "(cached)" suffix)
+        _DAILY_CACHE[key] = (True, {"delivery_dates": payload["delivery_dates"], "note": LAST_UPSTREAM_STATUS["note"]})
+        # return exactly what's cached to keep parity
+        return _DAILY_CACHE[key]
 
     logging.warning(f"Generated token failed for {postCode}: {payload.get('error')}")
+
     # 2) try scraped token
     tok_ok, tok = _scrape_token(s)
     if not tok_ok:
@@ -214,8 +223,8 @@ def Posten(postCode: str):
     ok2, payload2, code2 = _fetch_dates(s, tok, postCode)
     if ok2:
         LAST_UPSTREAM_STATUS["note"] = "generated failed, scraped ok"
-        _DAILY_CACHE[key] = (True, payload2)
-        return (True, payload2)
+        _DAILY_CACHE[key] = (True, {"delivery_dates": payload2["delivery_dates"], "note": LAST_UPSTREAM_STATUS["note"]})
+        return _DAILY_CACHE[key]
 
     LAST_UPSTREAM_STATUS["note"] = "generated failed, scraped failed"
     err = {"source": "fetch_with_scraped_token", **payload2}
@@ -235,7 +244,7 @@ def _compose_payload_from_success(data: dict) -> dict:
         "status": 200,
         "interpreted_status": 200,
         "error": None,
-        "note": LAST_UPSTREAM_STATUS.get("note"),
+        "note": data.get("note"),  # includes "(cached)" when served from cache
     }
 
 def _compose_payload_from_error(err: dict) -> dict:
@@ -320,7 +329,7 @@ def delivery_days(postCode):
             "status": 200,
             "interpreted_status": 200,
             "error": None,
-            "note": LAST_UPSTREAM_STATUS.get("note"),
+            "note": res[1].get("note"),  # includes "(cached)" when served from cache
         }
         return jsonify(payload), 200
     else:
@@ -346,7 +355,7 @@ def delivery_next(postCode):
             "status": 200,
             "interpreted_status": 200,
             "error": None,
-            "note": LAST_UPSTREAM_STATUS.get("note"),
+            "note": res[1].get("note"),  # includes "(cached)" when served from cache
         }
         return jsonify(payload), 200
     else:
