@@ -7,6 +7,7 @@ import time
 import base64
 import logging
 import datetime as dt
+import sys
 
 from flask import (
     Flask,
@@ -14,9 +15,8 @@ from flask import (
     make_response,
     jsonify,
     send_from_directory,
-    Response,
 )
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 from gevent.pywsgi import WSGIServer
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -38,6 +38,12 @@ POSTEN_REFERER = "https://www.posten.no/levering-av-post"
 SERVICE_URL    = f"{POSTEN_REFERER}/_/service/no.posten.website/delivery-days"
 TOKEN_SEED_B64 = "pils"
 
+# Localized labels for /text and /next
+WEEKDAYS_NO = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"]
+MONTHS_NO   = ["Januar", "Februar", "Mars", "April", "Mai", "Juni", "Juli", "August",
+               "September", "Oktober", "November", "Desember"]
+NEXT_STRINGS = ["i dag", "i morgen", "i overmorgen"]
+
 # (connect, read) timeouts
 REQ_TIMEOUT = (3.05, 8.0)
 
@@ -52,8 +58,18 @@ RETRY = Retry(
 )
 
 # Global health info (best-effort)
-LAST_UPSTREAM_STATUS = {"status": None, "when": None, "note": None}
+LAST_UPSTREAM_STATUS = {
+    "status": None,               # raw upstream HTTP status
+    "interpreted_status": None,   # what our app concluded (e.g., 502 on empty data)
+    "error": None,                # short reason when we treat as error
+    "when": None,
+    "note": None,                 # e.g., "generated ok", "generated failed, scraped ok"
+    "body_preview": None,         # short preview of upstream body
+}
 
+# --------------------------
+# HTTP helpers
+# --------------------------
 
 def _new_session() -> Session:
     s = requests.Session()
@@ -96,54 +112,67 @@ def _scrape_token(s: Session):
         return (False, {"where": "scrape_token", "error": f"parse failed: {e}"})
 
 
+def _record_health(raw_status, note, body_preview, interpreted_status=None, error=None):
+    LAST_UPSTREAM_STATUS.update({
+        "status": raw_status,
+        "interpreted_status": interpreted_status,
+        "error": error,
+        "when": dt.datetime.now().isoformat(timespec="seconds"),
+        "note": note,
+        "body_preview": (body_preview or "")[:200] if body_preview is not None else None,
+    })
+
+
 def _fetch_dates(s: Session, token: str, post_code: str):
     """Call upstream with a token and parse the response defensively."""
     url = f"{SERVICE_URL}?postalCode={post_code}"
+    # Basic note (refined later by Posten() with "generated failed, scraped ok/failed")
+    note = "generated token" if len(token) < 64 else "scraped token"
+
     try:
         headers = {"kp-api-token": token}
         r = s.get(url, headers=headers, timeout=REQ_TIMEOUT)
     except RequestException as e:
+        _record_health(None, note, None, interpreted_status=502, error=f"transport: {e}")
         return (False, {"where": "fetch_dates", "status": None, "body": None, "error": str(e)}, 502)
 
     status = r.status_code
     body_text = r.text if r.text is not None else ""
-
-    # record for healthz
-    LAST_UPSTREAM_STATUS["status"] = status
-    LAST_UPSTREAM_STATUS["when"] = dt.datetime.now().isoformat(timespec="seconds")
-    LAST_UPSTREAM_STATUS["note"] = "generated_token" if len(token) < 64 else "scraped_token"
+    _record_health(status, note, body_text)
 
     if status != 200:
-        # Bubble up upstream status with body for insight
-        return (False, {"where": "fetch_dates", "status": status, "body": body_text, "error": "upstream non-200"},
-                status if 400 <= status < 600 else 502)
+        interpreted = status if 400 <= status < 600 else 502
+        _record_health(status, note, body_text, interpreted_status=interpreted, error="upstream non-200")
+        return (False, {"where": "fetch_dates", "status": status, "body": body_text, "error": "upstream non-200"}, interpreted)
 
     # 200 OK but shape may be [] / {}
     try:
         data = r.json()
     except ValueError:
+        _record_health(status, note, body_text, interpreted_status=502, error="invalid JSON")
         return (False, {"where": "fetch_dates", "status": 200, "body": body_text[:500], "error": "invalid JSON"}, 502)
 
     if not isinstance(data, dict) or "delivery_dates" not in data:
+        _record_health(status, note, body_text, interpreted_status=502, error="missing 'delivery_dates'")
         return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "missing 'delivery_dates'"}, 502)
 
     dates = data.get("delivery_dates")
     if not isinstance(dates, list):
+        _record_health(status, note, body_text, interpreted_status=502, error="'delivery_dates' not a list")
         return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "'delivery_dates' not a list"}, 502)
     if len(dates) == 0:
+        _record_health(status, note, body_text, interpreted_status=502, error="empty 'delivery_dates'")
         return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "empty 'delivery_dates'"}, 502)
 
-
     # Happy path
+    _record_health(status, note, body_text, interpreted_status=200, error=None)
     return (True, data, 200)
 
+# --------------------------
+# Daily success-only cache
+# --------------------------
 
-# ---------------------------------
-# Day-scoped cache key (Option A)
-# ---------------------------------
-
-# Bounded cache for today only
-_DAILY_CACHE = LRUCache(maxsize=5096)
+_DAILY_CACHE = LRUCache(maxsize=5096)  # only successful responses cached
 _CURRENT_DAY = dt.date.today().isoformat()
 
 def Posten(postCode: str):
@@ -169,31 +198,57 @@ def Posten(postCode: str):
     gen_token = _gen_token()
     ok, payload, code = _fetch_dates(s, gen_token, postCode)
     if ok:
+        LAST_UPSTREAM_STATUS["note"] = "generated ok"
         _DAILY_CACHE[key] = (True, payload)
         return (True, payload)
 
-    logging.warning(
-        f"Generated token failed for {postCode}: status={payload.get('status')} err={payload.get('error')}"
-    )
-
+    logging.warning(f"Generated token failed for {postCode}: {payload.get('error')}")
     # 2) try scraped token
     tok_ok, tok = _scrape_token(s)
     if not tok_ok:
+        LAST_UPSTREAM_STATUS["note"] = "generated failed, scraped failed"
         err = {"source": "token_scrape", **tok}
         logging.error(f"Token scrape failed for {postCode}: {err}")
         return (False, err, 502)
 
     ok2, payload2, code2 = _fetch_dates(s, tok, postCode)
     if ok2:
+        LAST_UPSTREAM_STATUS["note"] = "generated failed, scraped ok"
         _DAILY_CACHE[key] = (True, payload2)
         return (True, payload2)
 
+    LAST_UPSTREAM_STATUS["note"] = "generated failed, scraped failed"
     err = {"source": "fetch_with_scraped_token", **payload2}
     logging.error(
         f"Scraped token fetch failed for {postCode}: status={payload2.get('status')} err={payload2.get('error')}"
     )
     return (False, err, code2 if code2 else 502)
 
+# --------------------------
+# Response shaping helpers
+# --------------------------
+
+def _compose_payload_from_success(data: dict) -> dict:
+    """Ensure consistent payload (adds metadata)."""
+    return {
+        "delivery_dates": data.get("delivery_dates", []),
+        "status": 200,
+        "interpreted_status": 200,
+        "error": None,
+        "note": LAST_UPSTREAM_STATUS.get("note"),
+    }
+
+def _compose_payload_from_error(err: dict) -> dict:
+    """Return empty dates + metadata for errors; mirrors healthz info."""
+    return {
+        "delivery_dates": [],
+        "status": LAST_UPSTREAM_STATUS.get("status"),
+        "interpreted_status": LAST_UPSTREAM_STATUS.get("interpreted_status", 502),
+        "error": err.get("error") if isinstance(err, dict) else str(err),
+        "note": LAST_UPSTREAM_STATUS.get("note"),
+        "last_checked": LAST_UPSTREAM_STATUS.get("when"),
+        "upstream_body_preview": LAST_UPSTREAM_STATUS.get("body_preview"),
+    }
 
 # --------------------------
 # Flask app
@@ -204,15 +259,13 @@ CORS(app)
 app.config["JSON_AS_ASCII"] = False
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = True
 
-
 @app.route("/favicon.ico")
 def favicon():
     return send_from_directory(
         os.path.join(app.root_path, "static"),
         "posten-logo-ud.png",
-        mimetype="image/vnd.microsoft.icon",
+        mimetype="image/png",   # file is PNG, so serve proper MIME
     )
-
 
 @app.route("/")
 def hello():
@@ -224,93 +277,99 @@ def hello():
         f"<br><br>Source on <a href='https://github.com/Lanjelin/docker-posten/'>GitHub</a>"
     )
 
-
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    """Simple health endpoint with last upstream status hint."""
+    """Slim health endpoint including interpreted status, reason, and body preview."""
     return jsonify({
         "ok": True,
         "last_upstream": LAST_UPSTREAM_STATUS,
         "time": dt.datetime.now().isoformat(timespec="seconds"),
     }), 200
 
+# --------------------------
+# Endpoints
+# --------------------------
 
-@app.route("/raw/<int:postCode>", methods=["GET"])
 @app.route("/raw/<int:postCode>.json", methods=["GET"])
-@cross_origin()
+@app.route("/raw/<int:postCode>", methods=["GET"])
 def delivery_raw(postCode):
     postCode = str(postCode).zfill(4)
-    if request.method != "GET":
-        return Response(status=405)
-    if len(postCode) != 4:
-        return Response(status=404)
 
     res = Posten(postCode)
     if res[0]:
-        return jsonify(res[1]), 200
+        payload = _compose_payload_from_success(res[1])
+        return jsonify(payload), 200
     else:
         err = res[1]
-        status = res[2] if len(res) > 2 else 502
-        return jsonify({"ok": False, "postcode": postCode, "upstream": err}), status
+        payload = _compose_payload_from_error(err)
+        return jsonify(payload), 200  # stable 200 with empty dates + metadata
 
-
-@app.route("/text/<int:postCode>", methods=["GET"])
 @app.route("/text/<int:postCode>.json", methods=["GET"])
-@cross_origin()
+@app.route("/text/<int:postCode>", methods=["GET"])
 def delivery_days(postCode):
     postCode = str(postCode).zfill(4)
-    if request.method != "GET":
-        return Response(status=405)
-    if len(postCode) != 4:
-        return Response(status=404)
 
     res = Posten(postCode)
     if res[0]:
-        weekdays = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"]
-        months = ["Januar", "Februar", "Mars", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Desember"]
         out = []
         for d in res[1]["delivery_dates"]:
             date = dt.datetime.strptime(d, "%Y-%m-%d")
-            out.append(f"{weekdays[date.weekday()]} {date.day}. {months[date.month-1]}")
-        return jsonify({"delivery_dates": out}), 200
+            out.append(f"{WEEKDAYS_NO[date.weekday()]} {date.day}. {MONTHS_NO[date.month-1]}")
+        payload = {
+            "delivery_dates": out,
+            "status": 200,
+            "interpreted_status": 200,
+            "error": None,
+            "note": LAST_UPSTREAM_STATUS.get("note"),
+        }
+        return jsonify(payload), 200
     else:
         err = res[1]
-        status = res[2] if len(res) > 2 else 502
-        return jsonify({"ok": False, "postcode": postCode, "upstream": err}), status
+        payload = _compose_payload_from_error(err)
+        return jsonify(payload), 200
 
-
-@app.route("/next/<int:postCode>", methods=["GET"])
 @app.route("/next/<int:postCode>.json", methods=["GET"])
-@cross_origin()
+@app.route("/next/<int:postCode>", methods=["GET"])
 def delivery_next(postCode):
     postCode = str(postCode).zfill(4)
-    if request.method != "GET":
-        return Response(status=405)
-    if len(postCode) != 4:
-        return Response(status=404)
 
     res = Posten(postCode)
     if res[0]:
-        nextDatesStrings = ["i dag", "i morgen", "i overmorgen"]
         out = []
+        today = dt.datetime.now().date()
         for d in res[1]["delivery_dates"]:
             deliveryDate = dt.datetime.strptime(d, "%Y-%m-%d").date()
-            delta = (deliveryDate - dt.datetime.now().date()).days
-            out.append(nextDatesStrings[delta] if 0 <= delta <= 2 else f"om {delta} dager")
-        return jsonify({"delivery_dates": out}), 200
+            delta = (deliveryDate - today).days
+            out.append(NEXT_STRINGS[delta] if 0 <= delta <= 2 else f"om {delta} dager")
+        payload = {
+            "delivery_dates": out,
+            "status": 200,
+            "interpreted_status": 200,
+            "error": None,
+            "note": LAST_UPSTREAM_STATUS.get("note"),
+        }
+        return jsonify(payload), 200
     else:
         err = res[1]
-        status = res[2] if len(res) > 2 else 502
-        return jsonify({"ok": False, "postcode": postCode, "upstream": err}), status
+        payload = _compose_payload_from_error(err)
+        return jsonify(payload), 200
 
+# --------------------------
+# Main
+# --------------------------
 
 if __name__ == "__main__":
     # Ensure logs directory exists
     logs_dir = os.path.join(app.root_path, 'logs')
     os.makedirs(logs_dir, exist_ok=True)
 
+    # Log to both file and stdout (Docker-friendly)
+    handlers = [
+        logging.FileHandler(os.path.join(logs_dir, 'posten.log')),
+        logging.StreamHandler(sys.stdout)
+    ]
     logging.basicConfig(
-        filename=os.path.join(logs_dir, 'posten.log'),
+        handlers=handlers,
         format='%(asctime)s %(levelname)s:%(message)s',
         datefmt='%d/%m/%Y %H:%M:%S',
         level=logging.INFO
