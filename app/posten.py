@@ -127,6 +127,13 @@ def _fetch_dates(s: Session, token: str, post_code: str):
     if not isinstance(data, dict) or "delivery_dates" not in data:
         return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "missing 'delivery_dates'"}, 502)
 
+    dates = data.get("delivery_dates")
+    if not isinstance(dates, list):
+        return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "'delivery_dates' not a list"}, 502)
+    if len(dates) == 0:
+        return (False, {"where": "fetch_dates", "status": 200, "body": data, "error": "empty 'delivery_dates'"}, 502)
+
+
     # Happy path
     return (True, data, 200)
 
